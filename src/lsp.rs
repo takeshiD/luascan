@@ -1,12 +1,18 @@
 use crate::cli::LspOptions;
+use crate::config::RuntimeVersion;
+use crate::parser;
 use anyhow::{Result, anyhow};
 use jsonrpc::Result as LspResult;
 use lsp_types::{
-    InitializeParams, InitializeResult, MessageType, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    Diagnostic, DidChangeTextDocumentParams, InitializeParams, InitializeResult, MessageType,
+    Position, Range, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions,
 };
+use std::fs::File;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use tower_lsp::lsp_types::{DiagnosticSeverity, DidOpenTextDocumentParams, Url};
 use tower_lsp::{Client, LanguageServer, LspService, Server, jsonrpc, lsp_types};
 use tracing::{Level, event};
 
@@ -22,6 +28,44 @@ impl Backend {
         Self {
             client,
             root: Arc::new(RwLock::new(None)),
+        }
+    }
+    async fn check_syntax(&self, url: Url) {
+        let path = url
+            .to_file_path()
+            .expect("failed to convert from url to path");
+        if path.exists() {
+            let mut file = File::open(path).expect("failed to open");
+            let mut content = String::new();
+            file.read_to_string(&mut content)
+                .expect("failed to read content");
+            let diagnotics: Vec<Diagnostic> =
+                parser::parse(content.as_str(), crate::config::RuntimeVersion::Lua51)
+                    .iter()
+                    .map(|d| Diagnostic {
+                        range: Range {
+                            start: Position {
+                                line: d.loc.line_start as u32,
+                                character: d.loc.col_start as u32,
+                            },
+                            end: Position {
+                                line: d.loc.line_end as u32,
+                                character: d.loc.col_end as u32,
+                            },
+                        },
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        message: d.msg.clone(),
+                        ..Diagnostic::default()
+                    })
+                    .collect();
+            let log_msg = format!("chech syntax {:?} in {:?}", diagnotics, url);
+            self.client
+                .log_message(MessageType::INFO, log_msg.clone())
+                .await;
+            event!(Level::INFO, "{}", log_msg);
+            self.client
+                .publish_diagnostics(url.clone(), diagnotics, None)
+                .await;
         }
     }
     async fn set_root(&self, path: PathBuf) -> Result<()> {
@@ -73,7 +117,6 @@ impl LanguageServer for Backend {
             },
         })
     }
-
     async fn shutdown(&self) -> LspResult<()> {
         let log_msg = format!("shutdown in {:?}", self.get_root().await);
         self.client
@@ -81,6 +124,33 @@ impl LanguageServer for Backend {
             .await;
         event!(Level::INFO, "{}", log_msg);
         Ok(())
+    }
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        let log_msg = format!("did open in {:?}", self.get_root().await);
+        self.client
+            .log_message(MessageType::INFO, log_msg.clone())
+            .await;
+        event!(Level::INFO, "{}", log_msg);
+        if let Ok(path) = params.text_document.uri.to_file_path()
+            && path.is_file()
+            && params.text_document.language_id == "lua"
+        {
+            let uri = params.text_document.uri;
+            self.check_syntax(uri).await;
+        }
+    }
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let log_msg = format!("did change in {:?}", self.get_root().await);
+        self.client
+            .log_message(MessageType::INFO, log_msg.clone())
+            .await;
+        event!(Level::INFO, "{}", log_msg);
+        if let Ok(path) = params.text_document.uri.to_file_path()
+            && path.is_file()
+        {
+            let uri = params.text_document.uri;
+            self.check_syntax(uri).await;
+        }
     }
 }
 
