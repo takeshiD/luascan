@@ -13,13 +13,10 @@ keywords = ["cli", "syntax", "lsp", "lua", "luajit"]
 anyhow = "1.0.100"
 clap = { version = "4.5.48", features = ["derive"] }
 full_moon = { version = "2.0.0", features = ["lua52", "lua53", "lua54", "luajit"] }
+glob = "0.3.3"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.16"
-tokio = { version = "1.47.1", features = [
-    "io-std",
-    "macros",
-    "rt-multi-thread",
-] }
+tokio = { version = "1.47.1", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
 toml = "0.9.7"
 tower-lsp = "0.20.0"
 tracing = "0.1.41"

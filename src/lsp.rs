@@ -233,3 +233,58 @@ pub async fn run(options: LspOptions) -> Result<()> {
     Server::new(stdin, stdout, socket).serve(service).await;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
+    use tower_lsp::LspService;
+
+    use crate::{
+        cli::LspOptions,
+        config::{Config, RuntimeConfig, WorkspaceConfig},
+        lsp::Backend,
+    };
+
+    fn req(msg: &str) -> String {
+        format!("Content-Length: {}\r\n\r\n{}", msg.len(), msg)
+    }
+    fn create_lsp(options: LspOptions) -> (DuplexStream, DuplexStream) {
+        let (service, socket) = LspService::new(|client| Backend::new(client, options));
+        let (req_client, req_server) = duplex(64);
+        let (resp_client, resp_server) = duplex(64);
+        tokio::spawn(Server::new(req_server, resp_server, socket).serve(service));
+        // req_client --> req_server ==LSP==> resp_server --> resp_client
+        (req_client, resp_client)
+    }
+
+    #[tokio::test]
+    async fn test_initialize_lsp() {
+        let options = LspOptions {
+            config: Config {
+                runtime: RuntimeConfig::default(),
+                workspace: WorkspaceConfig {
+                    library: Vec::new(),
+                },
+            },
+        };
+        let (mut req_client, mut resp_client) = create_lsp(options);
+        let init_request = r#"{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "textDocumentSync": 1
+                }
+            }
+        }"#;
+        req_client
+            .write_all(req(init_request).as_bytes())
+            .await
+            .unwrap();
+        let mut buf = vec![0; 1024];
+        let _ = resp_client.read(&mut buf).await.unwrap();
+        assert!(!buf.is_empty())
+    }
+}
