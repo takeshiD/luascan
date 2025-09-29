@@ -1,5 +1,6 @@
 use crate::config::RuntimeVersion;
 use full_moon::{LuaVersion, parse_fallible};
+use tracing::{Level, event};
 
 #[derive(Debug, Clone)]
 pub struct Location {
@@ -28,24 +29,28 @@ pub fn parse(code: &str, version: RuntimeVersion) -> Vec<LuascanDiagnostic> {
     for e in ast.errors().iter() {
         match e {
             full_moon::Error::AstError(ast_err) => {
-                let range = ast_err.range().clone();
+                let token = ast_err.token().clone();
                 let loc = Location {
-                    line_start: range.0.line(),
-                    line_end: range.1.line(),
-                    col_start: range.0.character(),
-                    col_end: range.1.character(),
+                    line_start: token.start_position().line(),
+                    line_end: token.end_position().line(),
+                    col_start: token.start_position().character(),
+                    col_end: token.end_position().character(),
                 };
+                let log_msg = format!("parse ast-error {:?}", ast_err);
+                event!(Level::INFO, "{}", log_msg);
                 let msg = ast_err.error_message().to_string().clone();
                 ret.push(LuascanDiagnostic { loc, msg });
             }
             full_moon::Error::TokenizerError(tkn_err) => {
-                let range = tkn_err.range().clone();
+                let range = tkn_err.range();
                 let loc = Location {
                     line_start: range.0.line(),
                     line_end: range.1.line(),
                     col_start: range.0.character(),
                     col_end: range.1.character(),
                 };
+                let log_msg = format!("parse token-error {:?}", tkn_err);
+                event!(Level::INFO, "{}", log_msg);
                 let msg = tkn_err.error().to_string();
                 ret.push(LuascanDiagnostic { loc, msg });
             }
