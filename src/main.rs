@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod lsp;
 mod parser;
+mod workspace;
 
 use crate::cli::{CheckOptions, Command, LspOptions};
 use crate::error::LuascanError;

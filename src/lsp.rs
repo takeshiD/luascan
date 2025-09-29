@@ -1,6 +1,8 @@
 use crate::cli::LspOptions;
 use crate::parser;
 use anyhow::{Result, anyhow};
+use clap::builder::Str;
+use glob::glob;
 use jsonrpc::Result as LspResult;
 use lsp_types::{
     Diagnostic, InitializeParams, InitializeResult, InitializedParams, MessageType, OneOf,
@@ -9,6 +11,8 @@ use lsp_types::{
     WorkspaceServerCapabilities,
 };
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -24,7 +28,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct Backend {
     client: Client,
     root: Arc<RwLock<Option<PathBuf>>>,
-    workspace: Arc<RwLock<HashMap<String, String>>>,
+    workspace: Arc<RwLock<HashMap<PathBuf, String>>>,
 }
 
 impl Backend {
@@ -100,16 +104,16 @@ impl Backend {
             None
         }
     }
-    async fn set_doc(&self, uri: String, content: String) {
+    async fn set_doc(&self, path: PathBuf, content: String) {
         let ws_ref = Arc::clone(&self.workspace);
         if let Ok(mut writer) = ws_ref.write() {
-            writer.insert(uri, content);
+            writer.insert(path, content);
         }
     }
-    async fn get_doc(&self, uri: String) -> Option<String> {
+    async fn get_doc(&self, path: PathBuf) -> Option<String> {
         let ws_ref = Arc::clone(&self.workspace);
         if let Ok(reader) = ws_ref.read() {
-            reader.get(&uri).cloned()
+            reader.get(&path).cloned()
         } else {
             None
         }
@@ -126,26 +130,59 @@ impl LanguageServer for Backend {
             will_save_wait_until: Some(false),
             save: None,
         });
-        // if let Some(general_cap) = params.capabilities.general {
-        //     match general_cap.position_encodings {
-        //         Some(encodings) => {
-        //
-        //         }
-        //     }
-        // }
+        let position_encoding = match params.capabilities.general {
+            Some(general_cap) => match general_cap.position_encodings {
+                Some(encodings) => {
+                    if encodings.contains(&PositionEncodingKind::UTF8) {
+                        Some(PositionEncodingKind::UTF8)
+                    } else if encodings.contains(&PositionEncodingKind::UTF16) {
+                        Some(PositionEncodingKind::UTF16)
+                    } else if encodings.contains(&PositionEncodingKind::UTF32) {
+                        Some(PositionEncodingKind::UTF32)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            },
+            None => None,
+        };
         let server_info = Some(ServerInfo {
             name: "luascan".to_string(),
             version: Some(VERSION.to_string()),
         });
-        if let Some(url) = params.root_uri {
-            let _ = self.set_root(PathBuf::from(url.to_string())).await;
+        if let Some(url) = params.root_uri.clone() {
+            let mut path = PathBuf::from(url.path());
+            let _ = self.set_root(path.clone()).await;
+            // path.push("**/*.lua");
+            // for entry in glob(path.to_str().expect("failed to convert from path to str"))
+            //     .expect("failed to read path")
+            // {
+            //     match entry {
+            //         Ok(p) => {
+            //             event!(Level::INFO, "read {:?} in workspace", &p);
+            //             let mut content = String::new();
+            //             let mut file = File::open(&p).expect("failed to open file");
+            //             file.read_to_string(&mut content)
+            //                 .expect("failed to read file");
+            //             self.set_doc(p.clone(), content.clone()).await;
+            //             let uri = Url::from_file_path(
+            //                 p.to_str().expect("failed to convert from path to str"),
+            //             )
+            //             .expect("failed to parse url");
+            //             self.check_syntax(uri, content).await;
+            //         }
+            //         Err(e) => {
+            //             event!(Level::INFO, "glob error {:?}", e);
+            //         }
+            //     }
+            // }
         }
         Ok(InitializeResult {
             server_info,
             capabilities: ServerCapabilities {
                 text_document_sync: Some(text_document_sync),
-                position_encoding: Some(PositionEncodingKind::UTF8),
-                // diagnostic_provider: Some(diagnostic_provider),
+                position_encoding,
                 workspace: Some(WorkspaceServerCapabilities {
                     workspace_folders: Some(WorkspaceFoldersServerCapabilities {
                         supported: Some(true),
@@ -159,6 +196,34 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        let mut root_path = self.get_root().await.expect("failed to get root path");
+        root_path.push("**/*.lua");
+        for entry in glob(
+            root_path
+                .to_str()
+                .expect("failed to convert from path to str"),
+        )
+        .expect("failed to read path")
+        {
+            match entry {
+                Ok(p) => {
+                    event!(Level::INFO, "read {:?} in workspace", &p);
+                    let mut content = String::new();
+                    let mut file = File::open(&p).expect("failed to open file");
+                    file.read_to_string(&mut content)
+                        .expect("failed to read file");
+                    self.set_doc(p.clone(), content.clone()).await;
+                    let uri = Url::from_file_path(
+                        p.to_str().expect("failed to convert from path to str"),
+                    )
+                    .expect("failed to parse url");
+                    self.check_syntax(uri, content).await;
+                }
+                Err(e) => {
+                    event!(Level::INFO, "glob error {:?}", e);
+                }
+            }
+        }
         let log_msg = format!("initialized in {:?}", self.get_root().await);
         self.client
             .log_message(MessageType::INFO, log_msg.clone())
@@ -186,7 +251,8 @@ impl LanguageServer for Backend {
         {
             let uri = params.text_document.uri;
             let content = params.text_document.text;
-            self.set_doc(uri.to_string(), content.clone()).await;
+            self.set_doc(PathBuf::from(uri.path()), content.clone())
+                .await;
             self.check_syntax(uri, content).await;
         }
     }
